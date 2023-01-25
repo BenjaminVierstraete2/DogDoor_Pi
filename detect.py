@@ -8,15 +8,21 @@ from threading import Thread
 import importlib.util
 from tflite_runtime.interpreter import Interpreter
 import json
+from gpiozero import Servo
+
+servo1 = Servo(23)
+servo2 = Servo(24)
+
+servo1.max()
+servo2.min()
 
 
-# Source - Adrian Rosebrock, PyImageSearch: https://www.pyimagesearch.com/2015/12/28/increasing-raspberry-pi-fps-with-python-and-opencv/
 class VideoStream:
-    def __init__(self):
+    def __init__(self, resolution):
         self.stream = cv2.VideoCapture(0)
         ret = self.stream.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-        ret = self.stream.set(3,640)
-        ret = self.stream.set(4,480)
+        ret = self.stream.set(3, resolution[0])
+        ret = self.stream.set(4, resolution[1])
         # Read first frame from the stream
         (self.grabbed, self.frame) = self.stream.read()
         self.stopped = False
@@ -44,9 +50,15 @@ parser = argparse.ArgumentParser()
 
 parser.add_argument('--threshold', help='Minimum confidence threshold for displaying detected objects',default=0.9)
 
-parser.add_argument('--distance', help='maximum minimum distance between detected face and faces in data',default=0.5)
+parser.add_argument('--distance', help='maximum minimum distance between detected face and faces in data',default=0.1)
 
 parser.add_argument('--resolution', help='Desired webcam resolution in WxH. If the webcam does not support the resolution entered, errors may occur.',default='480x360')
+
+parser.add_argument('--view', help='Display video. This reduces FPS',default='True')
+
+parser.add_argument('allowed', help='Allowed dogs',default='Muchu')
+
+parser.add_argument('time-open', help='Time the door will be open',default='10')
 
 args = parser.parse_args()
 
@@ -54,6 +66,10 @@ min_conf_threshold = float(args.threshold)
 resW, resH = args.resolution.split('x')
 imW, imH = int(resW), int(resH)
 min_dist_threshold = float(args.distance)
+view_stream = args.view 
+allowed_dogs = args.allowed.split(',')
+time_open = int(args.time-open)
+
 
 
 detectionmodel = os.path.join(os.getcwd(),'models/detection.tflite')
@@ -73,13 +89,12 @@ def verify(embedding, database, min_dist_threshold):
             min_dist = dist
             identity = name 
     if min_dist > min_dist_threshold:
-        return 'unknown'        
+        return min_dist, 'unknown'        
     else:        
         return min_dist, identity
 
 def readDatabase(file):
     data = {}
-    print(file)
     with open(file) as json_file:
         data = json.load(json_file)
     return data
@@ -87,7 +102,7 @@ def readDatabase(file):
 def classify(embedding):
     distances = {}
     for database in [databaseEllie, databaseMarley, databaseMuchu]:
-        dist, identity = verify(embedding, database)
+        dist, identity = verify(embedding, database, min_dist_threshold)
         distances[identity] = dist
     name = ''.join([i for i in min(distances, key=distances.get) if not i.isdigit()]).split("_")[0]
     return name
@@ -111,6 +126,13 @@ def check_dog(xyxy, image):
     name = classify(embedding)
     return name
 
+def openDoor():
+    servo1.value = -0.53
+    servo2.max()
+
+def closeDoor():
+    servo1.max()
+    servo2.min()
 
 # Load the Tensorflow Lite model.
 interpreterDetection = Interpreter(model_path=detectionmodel)
@@ -138,15 +160,16 @@ frame_rate_calc = 1
 freq = cv2.getTickFrequency()
 
 # Initialize video stream
-videostream = VideoStream(resolution=(imW,imH),framerate=30).start()
+videostream = VideoStream(resolution=(imW,imH)).start()
 time.sleep(1)
 
-
-
-
-
+name = None
 #for frame1 in camera.capture_continuous(rawCapture, format="bgr",use_video_port=True):
 while True:
+    if name is not None and name.lower() in allowed_dogs:
+        openDoor()
+        time.sleep(time_open)
+        name = None
 
     # Start timer (for calculating frame rate)
     t1 = cv2.getTickCount()
@@ -185,7 +208,7 @@ while True:
     # Loop over all detections and draw detection box if confidence is above minimum threshold
     for i in range(len(scores)):
         if ((scores[i] > min_conf_threshold) and (scores[i] <= 1.0)):
-            label
+            
 
             # Get bounding box coordinates and draw box
             # Interpreter can return coordinates that are outside of image dimensions, need to force them to be within image using max() and min()
@@ -195,25 +218,31 @@ while True:
             xmax = int(min(imW,(boxes[i][3] * imW)))
             xyxy = [xmin, ymin, xmax, ymax]
             name = check_dog(xyxy, frame)
-            cv2.rectangle(frame, (xmin,ymin), (xmax,ymax), (10, 255, 0), 2)
 
-            # Draw label
-            label = '%s: %d%%' % (name, int(scores[i]*100)) # Example: 'person: 72%'
-            labelSize, baseLine = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2) # Get font size
-            label_ymin = max(ymin, labelSize[1] + 10) # Make sure not to draw label too close to top of window
-            cv2.rectangle(frame, (xmin, label_ymin-labelSize[1]-10), (xmin+labelSize[0], label_ymin+baseLine-10), (255, 255, 255), cv2.FILLED) # Draw white box to put label text in
-            cv2.putText(frame, label, (xmin, label_ymin-7), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2) # Draw label text
+            if view_stream:
+                cv2.rectangle(frame, (xmin,ymin), (xmax,ymax), (10, 255, 0), 2)
+                label = '%s: %d%%' % (name, int(scores[i]*100)) # Example: 'person: 72%'
+                labelSize, baseLine = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2) # Get font size
+                label_ymin = max(ymin, labelSize[1] + 10) # Make sure not to draw label too close to top of window
+                cv2.rectangle(frame, (xmin, label_ymin-labelSize[1]-10), (xmin+labelSize[0], label_ymin+baseLine-10), (255, 255, 255), cv2.FILLED) # Draw white box to put label text in
+                cv2.putText(frame, label, (xmin, label_ymin-7), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2) # Draw label text
 
     # Draw framerate in corner of frame
-    cv2.putText(frame,'FPS: {0:.2f}'.format(frame_rate_calc),(30,50),cv2.FONT_HERSHEY_SIMPLEX,1,(255,255,0),2,cv2.LINE_AA)
+    if view_stream:
+        cv2.putText(frame,'FPS: {0:.2f}'.format(frame_rate_calc),(30,50),cv2.FONT_HERSHEY_SIMPLEX,1,(255,255,0),2,cv2.LINE_AA)
 
-    # All the results have been drawn on the frame, so it's time to display it.
-    cv2.imshow('Object detector', frame)
+        # All the results have been drawn on the frame, so it's time to display it.
+        cv2.imshow('Object detector', frame)
 
+    if name is None or name.lower() not in allowed_dogs:
+        closeDoor()
+     
     # Calculate framerate
     t2 = cv2.getTickCount()
     time1 = (t2-t1)/freq
     frame_rate_calc= 1/time1
+    print(frame_rate_calc)
+
 
     # Press 'q' to quit
     if cv2.waitKey(1) == ord('q'):
@@ -222,3 +251,5 @@ while True:
 # Clean up
 cv2.destroyAllWindows()
 videostream.stop()
+
+
